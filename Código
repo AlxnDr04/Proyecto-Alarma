@@ -1,0 +1,192 @@
+#include "BluetoothSerial.h"
+#include <HardwareSerial.h>
+#include <Keypad.h>
+#include <Wire.h>
+#include <LiquidCrystal_PCF8574.h>
+
+// Configuración de HardwareSerial para el SIM800
+HardwareSerial sim800(2);
+
+bool enviar = true;
+bool alarmasActivas = false; // Inicialmente las alarmas están desactivadas
+bool sistemaArmado = false;  // Estado del sistema inicialmente desarmado
+String clave = "";
+const String claveCorrecta = "1234"; // Clave para apagar las alarmas
+
+const byte FILAS = 4; // Número de filas del teclado matricial
+const byte COLUMNAS = 4; // Número de columnas del teclado matricial
+char teclas[FILAS][COLUMNAS] = {
+  {'1','2','3','A'},
+  {'4','5','6','B'},
+  {'7','8','9','C'},
+  {'*','0','#','D'}
+};
+byte pinesFilas[FILAS] = {32, 33, 25, 26}; // Pines del ESP32 conectados a las filas del teclado matricial
+byte pinesColumnas[COLUMNAS] = {27, 14, 12, 13}; // Pines del ESP32 conectados a las columnas del teclado matricial
+
+Keypad keypad = Keypad(makeKeymap(teclas), pinesFilas, pinesColumnas, FILAS, COLUMNAS);
+
+// Configuración de la pantalla LCD con dirección I2C 0x27
+LiquidCrystal_PCF8574 lcd(0x27);
+
+String device_name = "ESP32-BT-proyecto";
+String btBuffer = ""; // Búfer para almacenar los caracteres recibidos por Bluetooth
+const String palabraClave = "DESACTIVAR"; // Palabra para desactivar las alarmas
+const String comandoArmar = "ARMAR"; // Comando para armar el sistema
+const String comandoDesarmar = "DESARMAR"; // Comando para desarmar el sistema
+
+BluetoothSerial SerialBT;
+
+void setup() {
+  Serial.begin(9600);
+  sim800.begin(9600, SERIAL_8N1, 19, 18); // Pines para el módulo SIM800: TX 19, RX 18
+  SerialBT.begin(device_name); // Nombre del dispositivo Bluetooth
+  Serial.printf("The device with name \"%s\" is started.\nNow you can pair it with Bluetooth!\n", device_name.c_str());
+  pinMode(2, INPUT);
+  pinMode(4, OUTPUT);
+
+  // Inicializar la pantalla LCD con pines SDA y SCL personalizados
+  Wire.begin(27, 26); // SDA en pin 27, SCL en pin 26
+  lcd.begin(16, 2, Wire);
+  lcd.setBacklight(255);
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Proyecto Alarma");
+
+  delay(2000);
+}
+
+void loop() {
+  // Leer tecla presionada en el teclado matricial si el sistema está armado
+  if (sistemaArmado) {
+    char key = keypad.getKey();
+    if (key != NO_KEY) {
+      Serial.print("Tecla presionada: ");
+      Serial.println(key);
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("Tecla: ");
+      lcd.print(key);
+      if (key == '#') { // Si se presiona '#', verificar la clave ingresada
+        if (clave == claveCorrecta) {
+          digitalWrite(4, LOW); // Apagar el buzzer
+          SerialBT.println("Alertas desactivadas");
+          lcd.setCursor(0, 1);
+          lcd.print("Alertas OFF");
+          clave = ""; // Limpiar la clave ingresada
+        } else {
+          SerialBT.println("Clave incorrecta");
+          lcd.setCursor(0, 1);
+          lcd.print("Clave incorrecta");
+          clave = ""; // Limpiar la clave ingresada
+        }
+      } else {
+        clave += key; // Agregar la tecla a la clave ingresada
+      }
+    }
+  }
+
+  if (sistemaArmado && digitalRead(2)) {
+    digitalWrite(4, HIGH);
+    SerialBT.println("Sistema vulnerado");
+    
+    //---------------------------------------------------------
+    // Sección SIM800L
+    
+    // ENVIA EL COMANDO AT PARA VERIFICAR LA COMUNICACIÓN CON EL SIM800
+    sim800.println("AT");
+  
+    // RETARDO DE 1 SEGUNDO
+    delay(1000);
+  
+    if (sim800.find("OK")) {
+      // COMUNICACIÓN CON SIM800 ESTABLECIDA
+      Serial.println("Comunicación con SIM800 establecida.");
+
+      // CONFIGURA EL MODO DE TEXTO
+      sim800.println("AT+CMGF=1");
+    
+      // RETARDO DE 1 SEGUNDO
+      delay(1000);
+
+      // REEMPLAZA CON EL NÚMERO DE DESTINO
+      sim800.println("AT+CMGS=\"+51942504980\"");
+    
+      // RETARDO DE 1 SEGUNDO
+      delay(1000);
+
+      // ESCRIBE EL CONTENIDO DEL SMS Y ENVÍA SI LA VARIABLE 'enviar' ES TRUE
+      if (enviar) {
+        sim800.print("Este es un mensaje de prueba desde ESP32.");
+        
+        // RETARDO DE 1 SEGUNDO
+        delay(1000);
+
+        // ENVÍA CTRL+Z (CARÁCTER DE FINALIZACIÓN DE MENSAJE)
+        sim800.write(0x1A);
+        
+        // RETARDO DE 1 SEGUNDO
+        delay(1000);
+
+        // ESPERA HASTA QUE EL SIM800 ENVÍE UNA RESPUESTA
+        while (!sim800.available()) {}
+
+        if (sim800.find("OK")) {
+          // SMS ENVIADO CORRECTAMENTE
+          Serial.println("SMS enviado correctamente.");
+        } else {
+          // ERROR AL ENVIAR EL SMS
+          Serial.println("Error al enviar el SMS.");
+        }
+      } else {
+        // SMS NO ENVIADO DEBIDO A LA VARIABLE 'enviar' EN FALSE
+        Serial.println("SMS no enviado debido a la variable 'enviar' en false.");
+      }
+    } else {
+      // ERROR DE COMUNICACIÓN CON SIM800
+      Serial.println("Error de comunicación con SIM800.");
+    }
+  }
+
+  //---------------------------------------------------------
+  // Parte Bluetooth     
+  if (SerialBT.available()) {
+    char dato = SerialBT.read();
+    btBuffer += dato; // Agregar dato al búfer
+
+    // Verificar si el comando de armar o desarmar está en el búfer
+    if (btBuffer.endsWith(comandoArmar)) {
+      sistemaArmado = true;
+      SerialBT.println("Sistema armado");
+      lcd.setCursor(0, 1);
+      lcd.print("Sistema ARMADO");
+      delay(2000); // Esperar 2 segundos
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("Proyecto Alarma");
+      btBuffer = ""; // Limpiar el búfer de Bluetooth
+    } else if (btBuffer.endsWith(comandoDesarmar)) {
+      sistemaArmado = false;
+      digitalWrite(4, LOW); // Asegurarse de que el buzzer esté apagado
+      SerialBT.println("Sistema desarmado");
+      lcd.setCursor(0, 1);
+      lcd.print("Sistema DESARMADO");
+      delay(2000); // Esperar 2 segundos
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("Proyecto Alarma");
+      btBuffer = ""; // Limpiar el búfer de Bluetooth
+    } else if (btBuffer.endsWith(palabraClave) && sistemaArmado) {
+      digitalWrite(4, LOW); // Apagar el buzzer
+      SerialBT.println("Alertas desactivadas");
+      lcd.setCursor(0, 1);
+      lcd.print("Alarma OFF");
+      delay(2000); // Esperar 2 segundos
+      lcd.clear(); // Limpiar la pantalla
+      lcd.setCursor(0, 0);
+      lcd.print("Proyecto Alarma"); // Mostrar el texto original
+      clave = ""; // Limpiar la clave ingresada
+      btBuffer = ""; // Limpiar el búfer de Bluetooth
+    }
+  }
+}
